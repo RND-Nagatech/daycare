@@ -25,25 +25,28 @@ export const reportLabels = {
 type ReportKey = keyof typeof reportLabels;
 type ReportRow = Record<string, string | number>;
 
-const internalColumns = new Set(["_key", "_date", "_filter", "_amount"]);
+const internalColumns = new Set(["_key", "_date", "_filter", "_child", "_amount"]);
 
 export function ReportView({ report }: { report: string }) {
   const key = (report in reportLabels ? report : "kehadiran") as ReportKey;
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [filter, setFilter] = useState("");
+  const [childFilter, setChildFilter] = useState("");
   const [exporting, setExporting] = useState(false);
   const { data, isLoading } = useQuery({ queryKey: daycareQueryKey, queryFn: daycareApi.snapshot });
   const children = data?.children ?? [];
   const childName = (id: string) => children.find((child) => child.id === id)?.name ?? "-";
   const allRows = useMemo(() => buildRows(key, data, childName), [data, key]);
   const filterOptions = useMemo(() => Array.from(new Set(allRows.map((row) => String(row._filter ?? "")).filter(Boolean))).sort(), [allRows]);
+  const childOptions = useMemo(() => Array.from(new Set(allRows.map((row) => String(row._child ?? "")).filter((name) => name && name !== "-"))).sort(), [allRows]);
   const rows = useMemo(() => allRows.filter((row) => {
     const date = String(row._date ?? "").slice(0, 10);
     if (fromDate && (!date || date < fromDate)) return false;
     if (toDate && (!date || date > toDate)) return false;
+    if (key === "aktivitas" && childFilter && row._child !== childFilter) return false;
     return !filter || row._filter === filter;
-  }), [allRows, filter, fromDate, toDate]);
+  }), [allRows, childFilter, filter, fromDate, toDate]);
   const visibleKeys = Object.keys(allRows[0] ?? { informasi: "Informasi" }).filter((column) => !internalColumns.has(column));
   const columns: DataColumn<ReportRow>[] = visibleKeys.map((column) => ({
     key: column,
@@ -52,7 +55,11 @@ export function ReportView({ report }: { report: string }) {
   }));
   const period = fromDate || toDate ? `${fromDate || "Awal data"} s.d. ${toDate || "Hari ini"}` : "Semua tanggal";
   const amountTotal = rows.reduce((sum, row) => sum + Number(row._amount ?? 0), 0);
-  const summary = [`Total data: ${rows.length}`, ...(amountTotal > 0 ? [`Total nilai: ${formatIDR(amountTotal)}`] : [])];
+  const summary = [
+    ...(key === "aktivitas" && childFilter ? [`Anak: ${childFilter}`] : []),
+    `Total data: ${rows.length}`,
+    ...(amountTotal > 0 ? [`Total nilai: ${formatIDR(amountTotal)}`] : []),
+  ];
 
   async function exportPdf() {
     if (!rows.length) { toast.error("Tidak ada data untuk diekspor"); return; }
@@ -83,11 +90,12 @@ export function ReportView({ report }: { report: string }) {
       description="Filter dan preview transaksi aktual sebelum laporan diekspor."
       actions={<div className="flex flex-wrap gap-2"><button className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2.5 text-sm font-semibold disabled:opacity-50" disabled={!rows.length} onClick={() => exportRows(reportLabels[key], rows, visibleKeys)}><Download className="size-4" /> Export CSV</button><button className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2.5 text-sm font-semibold text-primary-foreground disabled:opacity-50" disabled={!rows.length || exporting} onClick={exportPdf}><FileText className="size-4" /> {exporting ? "Membuat PDF..." : "Export PDF"}</button></div>}
     >
-      <section className="mb-5 grid gap-3 rounded-lg border border-border/60 bg-card p-4 md:grid-cols-[1fr_1fr_1.25fr_auto] md:items-end">
+      <section className={`mb-5 grid gap-3 rounded-lg border border-border/60 bg-card p-4 md:items-end ${key === "aktivitas" ? "md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1fr_auto]" : "md:grid-cols-[1fr_1fr_1.25fr_auto]"}`}>
         <label className="grid gap-1.5 text-sm"><span className="text-xs font-medium text-muted-foreground">Tanggal mulai</span><input type="date" className="min-h-10 rounded-md border border-border bg-surface px-3" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
         <label className="grid gap-1.5 text-sm"><span className="text-xs font-medium text-muted-foreground">Tanggal akhir</span><input type="date" className="min-h-10 rounded-md border border-border bg-surface px-3" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+        {key === "aktivitas" && <label className="grid gap-1.5 text-sm"><span className="text-xs font-medium text-muted-foreground">Anak</span><select className="min-h-10 rounded-md border border-border bg-surface px-3" value={childFilter} onChange={(event) => setChildFilter(event.target.value)}><option value="">Semua Anak</option>{childOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>}
         <label className="grid gap-1.5 text-sm"><span className="text-xs font-medium text-muted-foreground">Filter {filterLabel(key)}</span><select className="min-h-10 rounded-md border border-border bg-surface px-3" value={filter} onChange={(event) => setFilter(event.target.value)}><option value="">Semua {filterLabel(key)}</option>{filterOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
-        <button className="min-h-10 rounded-md border border-border px-4 text-sm font-medium disabled:opacity-50" disabled={!fromDate && !toDate && !filter} onClick={() => { setFromDate(""); setToDate(""); setFilter(""); }}>Reset</button>
+        <button className="min-h-10 rounded-md border border-border px-4 text-sm font-medium disabled:opacity-50" disabled={!fromDate && !toDate && !filter && !(key === "aktivitas" && childFilter)} onClick={() => { setFromDate(""); setToDate(""); setFilter(""); setChildFilter(""); }}>Reset</button>
       </section>
       <div className="mb-5 grid gap-4 sm:grid-cols-3">
         <Metric label="Total Data" value={String(rows.length)} />
@@ -110,7 +118,7 @@ function dateValue(value?: string) {
 function buildRows(key: ReportKey, data: Awaited<ReturnType<typeof daycareApi.snapshot>> | undefined, childName: (id: string) => string): ReportRow[] {
   if (!data) return [];
   if (key === "kehadiran") return data.children.filter((item) => item.checkInAt || item.checkOutAt).map((item) => ({ _key: item.id, _date: dateValue(item.checkInAt ?? item.checkOutAt), _filter: item.status, tanggal: dateValue(item.checkInAt ?? item.checkOutAt), anak: item.name, status: item.status, check_in: item.checkInTime ?? "-", check_out: item.checkOutTime ?? "-" }));
-  if (key === "aktivitas") return data.activities.map((item) => ({ _key: item.id, _date: dateValue(item.createdAt), _filter: item.type, tanggal: dateValue(item.createdAt), anak: childName(item.childId), aktivitas: item.type, jam: item.time, pengasuh: item.staff, catatan: item.detail }));
+  if (key === "aktivitas") return data.activities.map((item) => ({ _key: item.id, _date: dateValue(item.createdAt), _filter: item.type, _child: childName(item.childId), tanggal: dateValue(item.createdAt), anak: childName(item.childId), aktivitas: item.type, jam: item.time, pengasuh: item.staff, catatan: item.detail }));
   if (key === "pembelian-paket") return data.packagePurchases.map((item) => ({ _key: item.id, _date: dateValue(item.createdAt ?? item.startDate), _filter: item.paymentStatus, _amount: item.price, transaksi: item.id, tagihan: item.invoiceId ?? "-", anak: childName(item.childId), paket: item.packageName, mulai: item.startDate, harga: formatIDR(item.price), pembayaran: item.paymentStatus }));
   if (key === "tagihan") return data.invoices.map((item) => ({ _key: item.id, _date: dateValue(item.createdAt), _filter: item.status, _amount: item.total, invoice: item.id, anak: childName(item.childId), periode: item.period, total: formatIDR(item.total), status: item.status }));
   if (key === "pembayaran") return data.payments.map((item) => ({ _key: item.id, _date: dateValue(item.paidAt), _filter: item.statusVerification ?? "verified", _amount: item.amount, tanggal: dateValue(item.paidAt), pembayaran: item.id, invoice: item.invoiceId, metode: item.method, nominal: formatIDR(item.amount), verifikasi: item.statusVerification ?? "verified" }));
