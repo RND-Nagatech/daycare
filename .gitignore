@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output and caches
+dist/
+**/dist/
+.output/
+**/.output/
+.vinxi/
+**/.vinxi/
+.tanstack/
+**/.tanstack/
+.nitro/
+**/.nitro/
+coverage/
+**/coverage/
+
+# Environment and secrets
+.env
+**/.env
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local tooling and generated artifacts
+.playwright-cli/
+output/
+referensi.html
+
+# Editors and operating systems
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*.local
