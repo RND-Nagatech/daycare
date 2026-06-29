@@ -1,6 +1,6 @@
 import { createFileRoute, Navigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ComponentType, type ReactNode } from "react";
 import { AppShell } from "@/components/app-shell";
 import {
   daycareApi,
@@ -11,7 +11,7 @@ import {
   type Incident,
   type MasterActivity,
 } from "@/lib/daycare-api";
-import { AlertTriangle, Baby, Blocks, Camera, Droplets, HeartPulse, Moon, Pill, Plus, ShieldAlert, Utensils } from "lucide-react";
+import { AlertTriangle, Baby, Blocks, Camera, Droplets, Eye, HeartPulse, ImagePlus, Moon, Pill, Plus, ShieldAlert, Upload, Utensils, X } from "lucide-react";
 import { toast } from "sonner";
 import { ModalForm } from "@/components/common/modal-form";
 
@@ -48,6 +48,7 @@ export type ActivityPageMode = "activity" | "health" | "incident";
 export function ActivityFeaturePage({ mode }: { mode: ActivityPageMode }) {
   const queryClient = useQueryClient();
   const [activeForm, setActiveForm] = useState<"activity" | "health" | "incident" | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<{ src: string; alt: string } | null>(null);
   const { data, isLoading } = useQuery({ queryKey: daycareQueryKey, queryFn: daycareApi.snapshot });
   const createActivity = useMutation({
     mutationFn: daycareApi.createActivity,
@@ -105,6 +106,9 @@ export function ActivityFeaturePage({ mode }: { mode: ActivityPageMode }) {
           onSubmit={(payload) => createIncident.mutate(payload)}
         />}
       </ModalForm>
+      <ModalForm open={Boolean(photoPreview)} onOpenChange={(open) => { if (!open) setPhotoPreview(null); }} title="Foto Aktivitas" size="lg">
+        {photoPreview && <div className="bg-surface p-4 sm:p-6"><img className="mx-auto max-h-[70vh] w-full rounded-lg object-contain" src={photoPreview.src} alt={photoPreview.alt} /></div>}
+      </ModalForm>
       {isLoading && <div className="mb-4 rounded-xl border border-border bg-card shadow-[0_4px_20px_rgba(155,135,245,0.08)] p-3 text-sm text-muted-foreground">Memuat aktivitas...</div>}
 
       {mode === "health" && <HealthNoteList items={healthNotes} childName={(id) => childById(id)?.name ?? "Anak"} />}
@@ -146,11 +150,7 @@ export function ActivityFeaturePage({ mode }: { mode: ActivityPageMode }) {
                   <div className="text-sm text-muted-foreground mt-1">{a.detail}</div>
                   <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground/80">
                     <span>oleh {a.staff}</span>
-                    {a.photoUrl && (
-                      <a href={a.photoUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2 py-0.5 text-foreground hover:bg-card">
-                        <Camera className="size-3" /> Foto
-                      </a>
-                    )}
+                    {a.photoUrl && <button type="button" title="Lihat foto aktivitas" aria-label={`Lihat foto aktivitas ${child?.name ?? "anak"}`} onClick={() => setPhotoPreview({ src: a.photoUrl!, alt: `Foto aktivitas ${a.type} - ${child?.name ?? "anak"}` })} className="inline-flex items-center gap-1 rounded-full border border-border bg-surface px-2 py-0.5 text-foreground hover:bg-card"><Eye className="size-3" /> Lihat Foto</button>}
                   </div>
                 </div>
               </li>
@@ -465,6 +465,13 @@ function ActivityForm({
 }) {
   const defaultActivityType = activityTypes[0]?.name ?? "";
   const defaultCaregiver = caregivers[0] ?? "";
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraRequestRef = useRef(0);
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
+  const [isOpeningCamera, setIsOpeningCamera] = useState(false);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [form, setForm] = useState({
     childId: "",
     type: defaultActivityType,
@@ -477,6 +484,73 @@ function ActivityForm({
   const selectedActivityType = form.type || defaultActivityType;
   const selectedCaregiver = form.staff || defaultCaregiver;
 
+  async function handlePhoto(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setIsProcessingPhoto(true);
+    try {
+      const photoUrl = await imageFileToDataUrl(file);
+      setForm((current) => ({ ...current, photoUrl }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Foto tidak dapat diproses");
+    } finally {
+      setIsProcessingPhoto(false);
+    }
+  }
+
+  async function openCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      toast.error("Browser atau perangkat ini tidak mendukung akses kamera langsung");
+      return;
+    }
+    const requestId = ++cameraRequestRef.current;
+    setIsOpeningCamera(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      if (requestId !== cameraRequestRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      cameraStreamRef.current = stream;
+      setIsCameraOpen(true);
+    } catch (error) {
+      if (requestId !== cameraRequestRef.current) return;
+      const name = error instanceof DOMException ? error.name : "";
+      if (name === "NotAllowedError") toast.error("Izin kamera ditolak. Izinkan akses kamera pada browser lalu coba lagi.");
+      else if (name === "NotFoundError") toast.error("Kamera tidak ditemukan pada perangkat ini");
+      else toast.error("Kamera tidak dapat dibuka");
+    } finally {
+      if (requestId === cameraRequestRef.current) setIsOpeningCamera(false);
+    }
+  }
+
+  function closeCamera() {
+    cameraRequestRef.current += 1;
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+    cameraStreamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setIsCameraOpen(false);
+  }
+
+  function capturePhoto() {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+      toast.error("Kamera belum siap. Tunggu sebentar lalu coba lagi.");
+      return;
+    }
+    try {
+      const photoUrl = imageSourceToDataUrl(video, video.videoWidth, video.videoHeight);
+      setForm((current) => ({ ...current, photoUrl }));
+      closeCamera();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Foto tidak dapat diambil");
+    }
+  }
+
   useEffect(() => {
     if (!form.type && defaultActivityType) {
       setForm((current) => ({ ...current, type: defaultActivityType }));
@@ -488,6 +562,17 @@ function ActivityForm({
       setForm((current) => ({ ...current, staff: defaultCaregiver }));
     }
   }, [defaultCaregiver, form.staff]);
+
+  useEffect(() => {
+    if (isCameraOpen && videoRef.current && cameraStreamRef.current) {
+      videoRef.current.srcObject = cameraStreamRef.current;
+    }
+  }, [isCameraOpen]);
+
+  useEffect(() => () => {
+    cameraRequestRef.current += 1;
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
 
   return (
     <form
@@ -553,18 +638,75 @@ function ActivityForm({
             <span className="text-xs font-medium text-muted-foreground">Catatan</span>
             <textarea className="min-h-24 resize-y rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring/30" placeholder="Contoh: Makan siang habis, tidur 45 menit, atau catatan obat." value={form.detail} onChange={(e) => setForm({ ...form, detail: e.target.value })} />
           </label>
-          <label className="grid gap-1.5 text-sm">
+          <div className="grid gap-1.5 text-sm">
             <span className="text-xs font-medium text-muted-foreground">Foto referensi</span>
-            <input className="min-h-10 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring/30" placeholder="URL foto opsional" value={form.photoUrl} onChange={(e) => setForm({ ...form, photoUrl: e.target.value })} />
-          </label>
+            <input ref={uploadInputRef} aria-label="Pilih foto dari perangkat" className="sr-only" type="file" accept="image/*" onChange={handlePhoto} />
+            {form.photoUrl ? <div className="flex items-center gap-3 rounded-lg border border-border bg-surface p-2">
+              <img className="size-16 rounded-md object-cover" src={form.photoUrl} alt="Preview foto aktivitas" />
+              <div className="min-w-0 flex-1"><p className="font-medium text-foreground">Foto siap disimpan</p><p className="text-xs text-muted-foreground">Foto sudah dioptimalkan untuk penyimpanan.</p></div>
+              <button type="button" title="Hapus foto" aria-label="Hapus foto" className="grid size-9 shrink-0 place-items-center rounded-md border border-border text-muted-foreground hover:bg-card hover:text-foreground" onClick={() => setForm((current) => ({ ...current, photoUrl: "" }))}><X className="size-4" /></button>
+            </div> : isCameraOpen ? <div className="overflow-hidden rounded-lg border border-border bg-black">
+              <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay playsInline muted aria-label="Preview kamera" />
+              <div className="flex items-center justify-end gap-2 bg-surface p-2">
+                <button type="button" className="rounded-md border border-border px-3 py-2 text-sm font-medium" onClick={closeCamera}>Tutup Kamera</button>
+                <button type="button" className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={capturePhoto}><Camera className="size-4" /> Ambil Foto</button>
+              </div>
+            </div> : <div className="grid grid-cols-2 gap-2">
+              <button type="button" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm font-medium hover:bg-card disabled:opacity-60" disabled={isProcessingPhoto} onClick={() => uploadInputRef.current?.click()}><Upload className="size-4" /> Upload Foto</button>
+              <button type="button" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm font-medium hover:bg-card disabled:opacity-60" disabled={isProcessingPhoto || isOpeningCamera} onClick={openCamera}><Camera className="size-4" /> {isOpeningCamera ? "Membuka Kamera..." : "Buka Kamera"}</button>
+            </div>}
+            {isProcessingPhoto && <span className="inline-flex items-center gap-2 text-xs text-muted-foreground"><ImagePlus className="size-3.5" /> Mengoptimalkan foto...</span>}
+          </div>
         </div>
       </div>
       <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
-        <button type="button" className="rounded-md border border-border px-4 py-2.5 text-sm font-medium" onClick={onCancel}>Batal</button>
-        <button className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-60" disabled={isSaving || !children.length || !activityTypes.length || !caregivers.length}>
+        <button type="button" className="rounded-md border border-border px-4 py-2.5 text-sm font-medium" onClick={() => { closeCamera(); onCancel(); }}>Batal</button>
+        <button className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-60" disabled={isSaving || isProcessingPhoto || isOpeningCamera || isCameraOpen || !children.length || !activityTypes.length || !caregivers.length}>
           <Plus className="size-4" /> {isSaving ? "Menyimpan..." : "Catat Aktivitas"}
         </button>
       </div>
     </form>
   );
+}
+
+function imageFileToDataUrl(file: File) {
+  if (!file.type.startsWith("image/")) return Promise.reject(new Error("File harus berupa gambar"));
+  if (file.size > 12 * 1024 * 1024) return Promise.reject(new Error("Ukuran foto maksimal 12 MB"));
+
+  return new Promise<string>((resolve, reject) => {
+    const source = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      try {
+        resolve(imageSourceToDataUrl(image, image.naturalWidth, image.naturalHeight));
+      } catch (error) {
+        reject(error);
+      } finally {
+        URL.revokeObjectURL(source);
+      }
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(source);
+      reject(new Error("Format foto tidak didukung oleh perangkat"));
+    };
+    image.src = source;
+  });
+}
+
+function imageSourceToDataUrl(source: CanvasImageSource, sourceWidth: number, sourceHeight: number) {
+  const maxDimension = 1440;
+  const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Foto tidak dapat diproses");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(source, 0, 0, width, height);
+  const result = canvas.toDataURL("image/jpeg", 0.82);
+  if (result.length > 2.5 * 1024 * 1024) throw new Error("Foto masih terlalu besar setelah dioptimalkan");
+  return result;
 }
