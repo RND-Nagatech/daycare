@@ -19,6 +19,7 @@ export type MasterField = {
   label: string;
   type: "text" | "number" | "time" | "date" | "select" | "checkbox" | "textarea";
   options?: string[];
+  optionsSource?: "shifts";
 };
 
 export type MasterResourceConfig = {
@@ -38,12 +39,12 @@ export const masterResourceConfigs: MasterResourceConfig[] = [
     description: "Data caregiver, peran, dan shift kerja.",
     snapshotKey: "caregivers",
     idField: "code",
-    columns: ["code", "name", "role", "shift", "status"],
+    columns: ["code", "name", "role", "shiftCode", "shiftName", "status"],
     fields: [
       { key: "code", label: "Kode", type: "text" },
       { key: "name", label: "Nama", type: "text" },
       { key: "role", label: "Peran", type: "text" },
-      { key: "shift", label: "Shift", type: "text" },
+      { key: "shiftCode", label: "Shift", type: "select", optionsSource: "shifts" },
       { key: "status", label: "Status", type: "select", options: ["Aktif", "Nonaktif"] },
     ],
   },

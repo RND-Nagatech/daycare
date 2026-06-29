@@ -1,4 +1,5 @@
 import { collections } from "./db.js";
+import { hashPassword } from "./auth-utils.js";
 import type {
   Activity,
   Booking,
@@ -13,6 +14,7 @@ import type {
   PackagePurchase,
   Payment,
   ParentGuardian,
+  UserRole,
 } from "./types.js";
 
 type CreateChildPayload = {
@@ -51,6 +53,8 @@ type PurchasePackagePayload = {
   packageName: string;
   startDate?: string;
   paymentStatus?: PackagePurchase["paymentStatus"];
+  payNow?: boolean;
+  paymentMethod?: string;
 };
 
 type CreateBookingPayload = {
@@ -76,6 +80,15 @@ type CreatePaymentPayload = {
 
 type VerifyPaymentPayload = {
   notes?: string;
+  reason?: string;
+};
+
+type UserPayload = {
+  name?: string;
+  email?: string;
+  password?: string;
+  role?: UserRole;
+  status?: "Aktif" | "Nonaktif";
 };
 
 type CreateHealthNotePayload = {
@@ -182,6 +195,26 @@ function parseOptionalDate(value: string | undefined, fallback: Date) {
   return parsed;
 }
 
+function publicUserRecord(user: { id: string; name: string; email: string; role: UserRole; isActive: boolean; createdAt: Date; updatedAt: Date }) {
+  return { id: user.id, name: user.name, email: user.email, role: user.role, status: user.isActive ? "Aktif" as const : "Nonaktif" as const, createdAt: user.createdAt, updatedAt: user.updatedAt };
+}
+
+const allowedUserRoles: UserRole[] = ["super_admin", "admin", "staff", "parent"];
+
+function jakartaDayRange() {
+  const date = currentJakartaDate();
+  return { start: new Date(`${date}T00:00:00+07:00`), end: new Date(`${date}T23:59:59.999+07:00`) };
+}
+
+function jakartaMonthRange() {
+  const date = currentJakartaDate();
+  const [year, month] = date.split("-").map(Number);
+  return {
+    start: new Date(Date.UTC(year, month - 1, 1) - 7 * 60 * 60 * 1000),
+    end: new Date(Date.UTC(year, month, 1) - 7 * 60 * 60 * 1000 - 1),
+  };
+}
+
 function masterResourceConfig(resource: string) {
   const c = collections();
   const configs = {
@@ -226,6 +259,23 @@ function cleanMasterPayload(payload: MasterRecord, now: Date, mode: "create" | "
     cleaned.createdAt = now;
   }
   return cleaned;
+}
+
+async function normalizeMasterPayload(resource: string, payload: MasterRecord, existing?: MasterRecord) {
+  if (resource !== "pengasuh") return payload;
+  const shiftCode = String(payload.shiftCode ?? existing?.shiftCode ?? "").trim();
+  if (!shiftCode) {
+    const error = new Error("Shift wajib dipilih dari Master Shift");
+    Object.assign(error, { status: 400 });
+    throw error;
+  }
+  const shift = await collections().shifts.findOne({ code: shiftCode, status: "Aktif" }, { projection: { _id: 0 } });
+  if (!shift) {
+    const error = new Error("Shift tidak ditemukan atau tidak aktif");
+    Object.assign(error, { status: 400 });
+    throw error;
+  }
+  return { ...payload, shiftCode: shift.code, shiftName: shift.name, shift: shift.name };
 }
 
 function timeToMinutes(time?: string) {
@@ -482,7 +532,10 @@ async function nextInvoiceId() {
 async function upsertCurrentInvoice(child: Child, overtimeHours = 0) {
   const c = collections();
   const period = currentPeriod();
-  const existing = await c.invoices.findOne({ childId: child.id, period }, { projection: { _id: 0 } });
+  const existing = await c.invoices.findOne(
+    { childId: child.id, period, purchaseId: { $exists: false } },
+    { projection: { _id: 0 } },
+  );
   const now = new Date();
   const masterPackage = await packageForChild(child);
   const basePackage = masterPackage.price;
@@ -510,7 +563,7 @@ async function upsertCurrentInvoice(child: Child, overtimeHours = 0) {
     overtimeHours,
     overtimeRate,
     extras: 0,
-    status: "Belum Dibayar",
+    status: "open",
     createdAt: now,
     updatedAt: now,
   };
@@ -530,9 +583,13 @@ async function recalculateInvoicePaymentStatus(invoice: Invoice) {
     .toArray();
   const paidTotal = verifiedPayments.reduce((sum, item) => sum + item.amount, 0);
   const total = invoiceTotal(invoice);
-  const status: Invoice["status"] = paidTotal >= total ? "Lunas" : paidTotal > 0 ? "Partial" : "Belum Dibayar";
+  const status: Invoice["status"] = paidTotal >= total ? "paid" : paidTotal > 0 ? "partial" : "open";
   const updatedInvoice: Invoice = { ...invoice, status, updatedAt: new Date() };
-  await collections().invoices.updateOne({ id: invoice.id }, { $set: updatedInvoice });
+  const purchaseStatus: PackagePurchase["paymentStatus"] = status === "paid" ? "paid" : status === "partial" ? "partial" : "unpaid";
+  await Promise.all([
+    collections().invoices.updateOne({ id: invoice.id }, { $set: updatedInvoice }),
+    collections().packagePurchases.updateMany({ invoiceId: invoice.id }, { $set: { paymentStatus: purchaseStatus, updatedAt: new Date() } }),
+  ]);
   return { invoice: invoiceWithTotal(updatedInvoice), paidTotal, remaining: Math.max(total - paidTotal, 0) };
 }
 
@@ -541,17 +598,19 @@ async function createPackagePurchaseRecord({
   masterPackage,
   invoice,
   startDate,
-  paymentStatus = "Belum Dibayar",
+  paymentStatus = "unpaid",
+  purchaseId,
 }: {
   child: Child;
   masterPackage: MasterPackage;
   invoice: Invoice;
   startDate?: string;
   paymentStatus?: PackagePurchase["paymentStatus"];
+  purchaseId?: string;
 }) {
   const now = new Date();
   const purchase: PackagePurchase = {
-    id: `PP-${Date.now()}`,
+    id: purchaseId ?? `PP-${Date.now()}`,
     childId: child.id,
     packageCode: masterPackage.code,
     packageName: masterPackage.name,
@@ -605,6 +664,126 @@ export const daycareService = {
     return masterDataSnapshot();
   },
 
+  async dashboardAdmin() {
+    const c = collections();
+    const today = currentJakartaDate();
+    const day = jakartaDayRange();
+    const month = jakartaMonthRange();
+    const verifiedPayment = { $or: [{ statusVerification: "verified" as const }, { statusVerification: { $exists: false } }] };
+    const [
+      totalChildren,
+      totalCaregivers,
+      totalPackages,
+      bookingsToday,
+      checkInsToday,
+      childrenInCare,
+      checkOutsToday,
+      openInvoices,
+      partialInvoices,
+      pendingPayments,
+      revenueTodayRows,
+      revenueMonthRows,
+    ] = await Promise.all([
+      c.children.countDocuments(),
+      c.caregivers.countDocuments({ status: "Aktif" }),
+      c.packages.countDocuments({ status: "Aktif" }),
+      c.bookings.countDocuments({ date: today, status: { $ne: "Dibatalkan" } }),
+      c.children.countDocuments({ checkInAt: { $gte: day.start, $lte: day.end } }),
+      c.children.countDocuments({ status: "Di Daycare" }),
+      c.children.countDocuments({ checkOutAt: { $gte: day.start, $lte: day.end } }),
+      c.invoices.countDocuments({ status: { $in: ["open", "Belum Dibayar"] } }),
+      c.invoices.countDocuments({ status: { $in: ["partial", "Partial"] } }),
+      c.payments.countDocuments({ statusVerification: "pending" }),
+      c.payments.find({ ...verifiedPayment, paidAt: { $gte: day.start, $lte: day.end } }, { projection: { amount: 1 } }).toArray(),
+      c.payments.find({ ...verifiedPayment, paidAt: { $gte: month.start, $lte: month.end } }, { projection: { amount: 1 } }).toArray(),
+    ]);
+    return {
+      operational: { totalChildren, totalCaregivers, totalPackages, bookingsToday, checkInsToday, childrenInCare, checkOutsToday },
+      finance: {
+        openInvoices,
+        partialInvoices,
+        pendingPayments,
+        revenueToday: revenueTodayRows.reduce((sum, item) => sum + item.amount, 0),
+        revenueMonth: revenueMonthRows.reduce((sum, item) => sum + item.amount, 0),
+      },
+    };
+  },
+
+  async listUsers() {
+    const users = await collections().users.find({}).sort({ createdAt: 1 }).toArray();
+    return users.map(publicUserRecord);
+  },
+
+  async createUser(payload: UserPayload) {
+    const name = payload.name?.trim();
+    const email = payload.email?.trim().toLowerCase();
+    const password = payload.password ?? "";
+    const role = payload.role;
+    if (!name || !email || !password || !role || !allowedUserRoles.includes(role)) {
+      const error = new Error("Nama, email, password, dan role yang valid wajib diisi");
+      Object.assign(error, { status: 400 });
+      throw error;
+    }
+    if (await collections().users.findOne({ email })) {
+      const error = new Error("Email sudah digunakan");
+      Object.assign(error, { status: 409 });
+      throw error;
+    }
+    const now = new Date();
+    const user = { id: `USR-${Date.now()}`, name, email, passwordHash: hashPassword(password), role, isActive: payload.status !== "Nonaktif", createdAt: now, updatedAt: now };
+    await collections().users.insertOne(user);
+    return publicUserRecord(user);
+  },
+
+  async updateUser(id: string, payload: UserPayload) {
+    const existing = await collections().users.findOne({ id });
+    if (!existing) {
+      const error = new Error("User tidak ditemukan");
+      Object.assign(error, { status: 404 });
+      throw error;
+    }
+    const name = payload.name?.trim() || existing.name;
+    const email = payload.email?.trim().toLowerCase() || existing.email;
+    const role = payload.role ?? existing.role;
+    if (!allowedUserRoles.includes(role)) {
+      const error = new Error("Role tidak valid");
+      Object.assign(error, { status: 400 });
+      throw error;
+    }
+    const duplicate = await collections().users.findOne({ email, id: { $ne: id } });
+    if (duplicate) {
+      const error = new Error("Email sudah digunakan");
+      Object.assign(error, { status: 409 });
+      throw error;
+    }
+    const patch = {
+      name,
+      email,
+      role,
+      isActive: payload.status ? payload.status === "Aktif" : existing.isActive,
+      updatedAt: new Date(),
+      ...(payload.password?.trim() ? { passwordHash: hashPassword(payload.password) } : {}),
+    };
+    await collections().users.updateOne({ id }, { $set: patch });
+    return publicUserRecord({ ...existing, ...patch });
+  },
+
+  async deleteUser(id: string) {
+    const existing = await collections().users.findOne({ id });
+    if (!existing) {
+      const error = new Error("User tidak ditemukan");
+      Object.assign(error, { status: 404 });
+      throw error;
+    }
+    if (existing.role === "super_admin" && await collections().users.countDocuments({ role: "super_admin" }) <= 1) {
+      const error = new Error("Super admin terakhir tidak boleh dihapus");
+      Object.assign(error, { status: 400 });
+      throw error;
+    }
+    await collections().users.deleteOne({ id });
+    return publicUserRecord(existing);
+  },
+
   async listMasterResource(resource: string) {
     const config = masterResourceConfig(resource);
     return config.collection.find({}, { projection: { _id: 0 } }).sort(config.sort).toArray();
@@ -613,7 +792,7 @@ export const daycareService = {
   async createMasterResource(resource: string, payload: MasterRecord) {
     const config = masterResourceConfig(resource);
     const now = new Date();
-    const document = cleanMasterPayload(payload, now, "create");
+    const document = cleanMasterPayload(await normalizeMasterPayload(resource, payload), now, "create");
     const idValue = document[config.idField];
     if (!idValue) {
       const error = new Error(`${config.idField} is required`);
@@ -633,13 +812,13 @@ export const daycareService = {
   async updateMasterResource(resource: string, id: string, payload: MasterRecord) {
     const config = masterResourceConfig(resource);
     const now = new Date();
-    const update = cleanMasterPayload(payload, now, "update");
     const existing = await config.collection.findOne({ [config.idField]: id }, { projection: { _id: 0 } });
     if (!existing) {
       const error = new Error("Master data not found");
       Object.assign(error, { status: 404 });
       throw error;
     }
+    const update = cleanMasterPayload(await normalizeMasterPayload(resource, payload, existing), now, "update");
     await config.collection.updateOne({ [config.idField]: id }, { $set: update });
     return { ...existing, ...update };
   },
@@ -716,10 +895,20 @@ export const daycareService = {
     return child;
   },
 
-  async purchasePackage(payload: PurchasePackagePayload) {
+  async purchasePackage(payload: PurchasePackagePayload, actorId = "system") {
     const child = await findChildOrThrow(payload.childId);
     const masterPackage = await findPackageOrThrow(payload.packageName);
     const now = new Date();
+    const payNow = Boolean(payload.payNow || payload.paymentStatus === "paid" || payload.paymentStatus === "Lunas");
+    const paymentMethod = payload.paymentMethod?.trim();
+    if (payNow) {
+      if (!paymentMethod) {
+        const error = new Error("Metode pembayaran wajib dipilih untuk bayar langsung");
+        Object.assign(error, { status: 400 });
+        throw error;
+      }
+      await findPaymentMethodOrThrow(paymentMethod);
+    }
     const updatedChild: Child = {
       ...child,
       package: masterPackage.name,
@@ -728,21 +917,57 @@ export const daycareService = {
     };
 
     await collections().children.updateOne({ id: child.id }, { $set: updatedChild });
-    const invoice = await upsertCurrentInvoice(updatedChild);
-    const paymentStatus = payload.paymentStatus ?? "Belum Dibayar";
-    const invoiceStatus = paymentStatus === "Lunas" ? "Lunas" : "Belum Dibayar";
-    const updatedInvoice: Invoice = { ...invoice, status: invoiceStatus, updatedAt: now };
-    await collections().invoices.updateOne({ id: invoice.id }, { $set: updatedInvoice });
-
+    const purchaseId = `PP-${Date.now()}`;
+    const invoiceId = await nextInvoiceId();
+    const invoice: Invoice = {
+      id: invoiceId,
+      purchaseId,
+      childId: updatedChild.id,
+      period: currentPeriod(),
+      basePackage: masterPackage.price,
+      hours: 0,
+      overtimeHours: 0,
+      overtimeRate: masterPackage.overtimeFee,
+      extras: 0,
+      items: [{
+        type: "paket",
+        referenceId: purchaseId,
+        description: masterPackage.name,
+        quantity: 1,
+        unitPrice: masterPackage.price,
+        total: masterPackage.price,
+      }],
+      status: payNow ? "paid" : "open",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await collections().invoices.insertOne(invoice);
     const purchase = await createPackagePurchaseRecord({
       child: updatedChild,
       masterPackage,
-      invoice: updatedInvoice,
+      invoice,
       startDate: payload.startDate,
-      paymentStatus,
+      paymentStatus: payNow ? "paid" : "unpaid",
+      purchaseId,
     });
+    let payment: Payment | undefined;
+    if (payNow) {
+      payment = {
+        id: `PAY-${Date.now()}`,
+        invoiceId,
+        method: paymentMethod!,
+        amount: masterPackage.price,
+        statusVerification: "verified",
+        verifiedAt: now,
+        verifiedBy: actorId,
+        paidAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await collections().payments.insertOne(payment);
+    }
 
-    return { child: updatedChild, purchase, invoice: invoiceWithTotal(updatedInvoice) };
+    return { child: updatedChild, purchase, invoice: invoiceWithTotal(invoice), payment };
   },
 
   async createBooking(payload: CreateBookingPayload) {
@@ -782,6 +1007,7 @@ export const daycareService = {
       ...child,
       status: "Di Daycare",
       checkInTime: currentJakartaTime(),
+      checkInAt: now,
       droppedOffBy: payload.droppedOffBy?.trim() || child.droppedOffBy,
       caregiver: payload.caregiver?.trim() || child.caregiver,
       checkInNotes: payload.checkInNotes?.trim() || undefined,
@@ -812,6 +1038,7 @@ export const daycareService = {
       ...child,
       status: "Sudah Pulang",
       checkOutTime: actualOut,
+      checkOutAt: now,
       pickedUpBy: payload.pickedUpBy?.trim() || undefined,
       checkOutCaregiver: payload.caregiver?.trim() || undefined,
       checkOutNotes: payload.notes?.trim() || undefined,
@@ -956,36 +1183,70 @@ export const daycareService = {
     return { payment, ...current };
   },
 
-  async verifyPayment(paymentId: string, payload: VerifyPaymentPayload = {}) {
+  async verifyPayment(paymentId: string, payload: VerifyPaymentPayload = {}, actorId = "system") {
     const payment = await findPaymentOrThrow(paymentId);
     const invoice = await findInvoiceOrThrow(payment.invoiceId);
     const now = new Date();
+    const { rejectedAt: _rejectedAt, rejectedBy: _rejectedBy, rejectReason: _rejectReason, ...paymentWithoutRejection } = payment;
     const updatedPayment: Payment = {
-      ...payment,
+      ...paymentWithoutRejection,
       statusVerification: "verified",
       verifiedAt: now,
-      rejectedAt: undefined,
+      verifiedBy: actorId,
       verificationNotes: payload.notes?.trim() || payment.verificationNotes,
       updatedAt: now,
     };
-    await collections().payments.updateOne({ id: payment.id }, { $set: updatedPayment, $unset: { rejectedAt: "" } });
+    await collections().payments.updateOne(
+      { id: payment.id },
+      {
+        $set: {
+          statusVerification: "verified",
+          verifiedAt: now,
+          verifiedBy: actorId,
+          verificationNotes: updatedPayment.verificationNotes,
+          updatedAt: now,
+        },
+        $unset: { rejectedAt: "", rejectedBy: "", rejectReason: "" },
+      },
+    );
     const current = await recalculateInvoicePaymentStatus(invoice);
     return { payment: updatedPayment, ...current };
   },
 
-  async rejectPayment(paymentId: string, payload: VerifyPaymentPayload = {}) {
+  async rejectPayment(paymentId: string, payload: VerifyPaymentPayload = {}, actorId = "system") {
     const payment = await findPaymentOrThrow(paymentId);
     const invoice = await findInvoiceOrThrow(payment.invoiceId);
     const now = new Date();
+    const reason = payload.reason?.trim() || payload.notes?.trim();
+    if (!reason) {
+      const error = new Error("Alasan penolakan wajib diisi");
+      Object.assign(error, { status: 400 });
+      throw error;
+    }
+    const { verifiedAt: _verifiedAt, verifiedBy: _verifiedBy, ...paymentWithoutVerification } = payment;
     const updatedPayment: Payment = {
-      ...payment,
+      ...paymentWithoutVerification,
       statusVerification: "rejected",
-      verifiedAt: undefined,
       rejectedAt: now,
-      verificationNotes: payload.notes?.trim() || payment.verificationNotes,
+      rejectedBy: actorId,
+      rejectReason: reason,
+      verificationNotes: reason,
       updatedAt: now,
     };
-    await collections().payments.updateOne({ id: payment.id }, { $set: updatedPayment, $unset: { verifiedAt: "" } });
+    await collections().payments.updateOne(
+      { id: payment.id },
+      {
+        $set: {
+          statusVerification: "rejected",
+          rejectedAt: now,
+          rejectedBy: actorId,
+          rejectReason: reason,
+          verificationNotes: reason,
+          updatedAt: now,
+        },
+        $unset: { verifiedAt: "", verifiedBy: "" },
+      },
+    );
     const current = await recalculateInvoicePaymentStatus(invoice);
     return { payment: updatedPayment, ...current };
   },

@@ -1,21 +1,4 @@
 import { MongoClient, type Collection, type Db } from "mongodb";
-import {
-  seedActivities,
-  seedActivityTypes,
-  seedAdditionalFees,
-  seedAgeGroups,
-  seedAnnouncements,
-  seedCaregivers,
-  seedChildren,
-  seedInvoices,
-  seedDaycareProfile,
-  seedHolidays,
-  seedPackages,
-  seedPaymentMethods,
-  seedParents,
-  seedRooms,
-  seedShifts,
-} from "./seed.js";
 import type {
   Activity,
   Booking,
@@ -119,6 +102,9 @@ export async function closeDatabase() {
 
 async function ensureIndexes() {
   const c = collections();
+  const invoiceIndexes = await c.invoices.indexes();
+  const legacyInvoiceIndex = invoiceIndexes.find((index) => index.name === "childId_1_period_1" && index.unique);
+  if (legacyInvoiceIndex?.name) await c.invoices.dropIndex(legacyInvoiceIndex.name);
   await Promise.all([
     c.children.createIndex({ id: 1 }, { unique: true }),
     c.parents.createIndex({ id: 1 }, { unique: true }),
@@ -138,7 +124,8 @@ async function ensureIndexes() {
     c.incidents.createIndex({ childId: 1, occurredAt: -1 }),
     c.incidents.createIndex({ status: 1, severity: 1 }),
     c.invoices.createIndex({ id: 1 }, { unique: true }),
-    c.invoices.createIndex({ childId: 1, period: 1 }, { unique: true }),
+    c.invoices.createIndex({ childId: 1, period: 1 }),
+    c.invoices.createIndex({ purchaseId: 1 }, { unique: true, sparse: true }),
     c.payments.createIndex({ id: 1 }, { unique: true }),
     c.payments.createIndex({ invoiceId: 1, paidAt: -1 }),
     c.payments.createIndex({ statusVerification: 1, paidAt: -1 }),
@@ -161,56 +148,9 @@ async function ensureIndexes() {
 
 async function seedIfEmpty() {
   const c = collections();
-  const [
-    childCount,
-    parentCount,
-    caregiverCount,
-    packageCount,
-    activityTypeCount,
-    ageGroupCount,
-    roomCount,
-    shiftCount,
-    additionalFeeCount,
-    announcementCount,
-    paymentMethodCount,
-    holidayCount,
-    daycareProfileCount,
-    userCount,
-  ] = await Promise.all([
-    c.children.countDocuments(),
-    c.parents.countDocuments(),
-    c.caregivers.countDocuments(),
-    c.packages.countDocuments(),
-    c.activityTypes.countDocuments(),
-    c.ageGroups.countDocuments(),
-    c.rooms.countDocuments(),
-    c.shifts.countDocuments(),
-    c.additionalFees.countDocuments(),
-    c.announcements.countDocuments(),
-    c.paymentMethods.countDocuments(),
-    c.holidays.countDocuments(),
-    c.daycareProfile.countDocuments(),
-    c.users.countDocuments(),
-  ]);
+  const userCount = await c.users.countDocuments();
 
   const tasks: Promise<unknown>[] = [];
-  if (childCount === 0) {
-    tasks.push(c.children.insertMany(seedChildren));
-    tasks.push(c.activities.insertMany(seedActivities));
-    tasks.push(c.invoices.insertMany(seedInvoices));
-  }
-  if (parentCount === 0) tasks.push(c.parents.insertMany(seedParents));
-  if (caregiverCount === 0) tasks.push(c.caregivers.insertMany(seedCaregivers));
-  if (packageCount === 0) tasks.push(c.packages.insertMany(seedPackages));
-  if (activityTypeCount === 0) tasks.push(c.activityTypes.insertMany(seedActivityTypes));
-  if (ageGroupCount === 0) tasks.push(c.ageGroups.insertMany(seedAgeGroups));
-  if (roomCount === 0) tasks.push(c.rooms.insertMany(seedRooms));
-  if (shiftCount === 0) tasks.push(c.shifts.insertMany(seedShifts));
-  if (additionalFeeCount === 0) tasks.push(c.additionalFees.insertMany(seedAdditionalFees));
-  if (announcementCount === 0) tasks.push(c.announcements.insertMany(seedAnnouncements));
-  if (paymentMethodCount === 0) tasks.push(c.paymentMethods.insertMany(seedPaymentMethods));
-  if (holidayCount === 0) tasks.push(c.holidays.insertMany(seedHolidays));
-  if (daycareProfileCount === 0) tasks.push(c.daycareProfile.insertOne(seedDaycareProfile));
   if (userCount === 0) {
     tasks.push(
       c.users.insertOne({
@@ -229,6 +169,73 @@ async function seedIfEmpty() {
   await Promise.all(tasks);
   await backfillParentsFromChildren();
   await backfillPackagePurchasesFromChildren();
+  await ensurePackagePurchaseInvoices();
+  await backfillCaregiverShifts();
+}
+
+async function ensurePackagePurchaseInvoices() {
+  const c = collections();
+  const purchases = await c.packagePurchases.find({}).toArray();
+  for (const purchase of purchases) {
+    const linkedInvoice = purchase.invoiceId
+      ? await c.invoices.findOne({ id: purchase.invoiceId })
+      : null;
+    if (linkedInvoice && (!linkedInvoice.purchaseId || linkedInvoice.purchaseId === purchase.id)) {
+      await c.invoices.updateOne(
+        { id: linkedInvoice.id },
+        { $set: { purchaseId: purchase.id, updatedAt: new Date() } },
+      );
+      continue;
+    }
+
+    const now = new Date();
+    const invoiceId = `INV-MIG-${purchase.id.replace(/[^A-Za-z0-9-]/g, "-")}`;
+    const paid = purchase.paymentStatus === "paid" || purchase.paymentStatus === "Lunas";
+    const partial = purchase.paymentStatus === "partial";
+    const invoice: Invoice = {
+      id: invoiceId,
+      purchaseId: purchase.id,
+      childId: purchase.childId,
+      period: purchase.startDate.slice(0, 7),
+      basePackage: purchase.price,
+      hours: 0,
+      overtimeHours: 0,
+      overtimeRate: 0,
+      extras: 0,
+      items: [{
+        type: "paket",
+        referenceId: purchase.id,
+        description: purchase.packageName,
+        quantity: 1,
+        unitPrice: purchase.price,
+        total: purchase.price,
+      }],
+      status: paid ? "paid" : partial ? "partial" : "open",
+      createdAt: purchase.createdAt ?? now,
+      updatedAt: now,
+    };
+    await c.invoices.updateOne({ id: invoiceId }, { $setOnInsert: invoice }, { upsert: true });
+    await c.packagePurchases.updateOne(
+      { id: purchase.id },
+      { $set: { invoiceId, paymentStatus: paid ? "paid" : partial ? "partial" : "unpaid", updatedAt: now } },
+    );
+  }
+}
+
+async function backfillCaregiverShifts() {
+  const c = collections();
+  const [caregivers, shifts] = await Promise.all([
+    c.caregivers.find({ $or: [{ shiftCode: { $exists: false } }, { shiftName: { $exists: false } }] }).toArray(),
+    c.shifts.find({}).toArray(),
+  ]);
+  await Promise.all(caregivers.map((caregiver) => {
+    const shift = shifts.find((item) => item.name === caregiver.shift || item.code === caregiver.shift);
+    if (!shift) return Promise.resolve();
+    return c.caregivers.updateOne(
+      { code: caregiver.code },
+      { $set: { shiftCode: shift.code, shiftName: shift.name, shift: shift.name, updatedAt: new Date() } },
+    );
+  }));
 }
 
 function parentIdFromPhone(phone: string) {

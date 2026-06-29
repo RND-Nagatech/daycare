@@ -24,6 +24,10 @@ const statusTone: Record<string, string> = {
   Lunas: "bg-success/20 text-success-foreground",
   "Belum Dibayar": "bg-warning/25 text-warning-foreground",
   Partial: "bg-primary/15 text-primary",
+  paid: "bg-success/20 text-success-foreground",
+  unpaid: "bg-warning/25 text-warning-foreground",
+  partial: "bg-primary/15 text-primary",
+  open: "bg-warning/25 text-warning-foreground",
   Overdue: "bg-destructive/15 text-destructive",
 };
 
@@ -43,6 +47,7 @@ export function FinanceFeaturePage({ mode }: { mode: FinancePageMode }) {
   const queryClient = useQueryClient();
   const [activeForm, setActiveForm] = useState<"package" | "payment" | null>(null);
   const [verification, setVerification] = useState<{ id: string; action: "verify" | "reject" } | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const { data, isLoading } = useQuery({ queryKey: daycareQueryKey, queryFn: daycareApi.snapshot });
   const recalculate = useMutation({
     mutationFn: daycareApi.recalculateInvoices,
@@ -65,8 +70,8 @@ export function FinanceFeaturePage({ mode }: { mode: FinancePageMode }) {
     onError: (error) => toast.error(error.message),
   });
   const rejectPayment = useMutation({
-    mutationFn: (paymentId: string) => daycareApi.rejectPayment(paymentId),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: daycareQueryKey }); setVerification(null); toast.success("Pembayaran ditolak"); },
+    mutationFn: ({ paymentId, reason }: { paymentId: string; reason: string }) => daycareApi.rejectPayment(paymentId, { reason }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: daycareQueryKey }); setVerification(null); setRejectReason(""); toast.success("Pembayaran ditolak"); },
     onError: (error) => toast.error(error.message),
   });
   const invoices = data?.invoices ?? [];
@@ -104,7 +109,7 @@ export function FinanceFeaturePage({ mode }: { mode: FinancePageMode }) {
         </button>}
     >
       {mode === "purchase" && <ModalForm open={activeForm === "package"} onOpenChange={(open) => { if (!open) setActiveForm(null); }} title="Pembelian Paket" showHeader={false}>
-        {activeForm === "package" && <PurchasePackageForm children={children} packages={packages} isSaving={purchasePackage.isPending} onCancel={() => setActiveForm(null)} onSubmit={(payload) => purchasePackage.mutate(payload)} />}
+        {activeForm === "package" && <PurchasePackageForm children={children} packages={packages} methods={paymentMethods.map((item) => item.name)} isSaving={purchasePackage.isPending} onCancel={() => setActiveForm(null)} onSubmit={(payload) => purchasePackage.mutate(payload)} />}
       </ModalForm>}
       {mode === "payments" && <ModalForm open={activeForm === "payment"} onOpenChange={(open) => { if (!open) setActiveForm(null); }} title="Catat Pembayaran" showHeader={false}>
         {activeForm === "payment" && <PaymentForm invoices={invoices} children={children} payments={payments} methods={paymentMethods.map((item) => item.name)} isSaving={createPayment.isPending} onCancel={() => setActiveForm(null)} onSubmit={(payload) => createPayment.mutate(payload)} />}
@@ -138,7 +143,8 @@ export function FinanceFeaturePage({ mode }: { mode: FinancePageMode }) {
                   </div>
                   <div className="text-left sm:text-right">
                     <div className="font-display">{formatIDR(purchase.price)}</div>
-                    <span className={`inline-block mt-1 rounded-full px-2 py-0.5 text-[11px] ${purchase.paymentStatus === "Lunas" ? statusTone.Lunas : statusTone["Belum Dibayar"]}`}>
+                    <div className="mt-1 text-xs text-muted-foreground">Tagihan {purchase.invoiceId}</div>
+                    <span className={`inline-block mt-1 rounded-full px-2 py-0.5 text-[11px] ${statusTone[purchase.paymentStatus] ?? statusTone.unpaid}`}>
                       {purchase.paymentStatus}
                     </span>
                   </div>
@@ -195,7 +201,7 @@ export function FinanceFeaturePage({ mode }: { mode: FinancePageMode }) {
                         <button
                           className="rounded-lg border border-destructive/30 px-2 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-60"
                           disabled={verifyPayment.isPending || rejectPayment.isPending}
-                          onClick={() => setVerification({ id: payment.id, action: "reject" })}
+                          onClick={() => { setRejectReason(""); setVerification({ id: payment.id, action: "reject" }); }}
                         >
                           Reject
                         </button>
@@ -256,7 +262,7 @@ export function FinanceFeaturePage({ mode }: { mode: FinancePageMode }) {
                   {paidByInvoice.get(i.id) ? (
                     <div className="text-xs text-muted-foreground">dibayar {formatIDR(paidByInvoice.get(i.id) ?? 0)}</div>
                   ) : null}
-                  <span className={`inline-block mt-1 text-[11px] px-2 py-0.5 rounded-full ${statusTone[i.status]}`}>{i.status}</span>
+                  <span className={`inline-block mt-1 text-[11px] px-2 py-0.5 rounded-full ${statusTone[i.status] ?? statusTone.open}`}>{i.status}</span>
                 </div>
               </li>
             );
@@ -269,7 +275,24 @@ export function FinanceFeaturePage({ mode }: { mode: FinancePageMode }) {
           </button>
         </div>
       </div>}
-      {mode === "payments" && <ConfirmDialog open={Boolean(verification)} onOpenChange={(open) => { if (!open) setVerification(null); }} title={verification?.action === "reject" ? "Tolak pembayaran?" : "Verifikasi pembayaran?"} description={verification?.action === "reject" ? "Pembayaran akan ditandai ditolak dan tidak mengurangi sisa tagihan." : "Nominal pembayaran akan dihitung ke tagihan terkait."} confirmLabel={verification?.action === "reject" ? "Tolak" : "Verifikasi"} destructive={verification?.action === "reject"} loading={verifyPayment.isPending || rejectPayment.isPending} onConfirm={() => { if (!verification) return; if (verification.action === "verify") verifyPayment.mutate(verification.id); else rejectPayment.mutate(verification.id); }} />}
+      {mode === "payments" && <ConfirmDialog open={verification?.action === "verify"} onOpenChange={(open) => { if (!open) setVerification(null); }} title="Verifikasi pembayaran?" description="Nominal pembayaran akan dihitung ke tagihan terkait." confirmLabel="Verifikasi" loading={verifyPayment.isPending} onConfirm={() => { if (verification?.action === "verify") verifyPayment.mutate(verification.id); }} />}
+      {mode === "payments" && <ModalForm open={verification?.action === "reject"} onOpenChange={(open) => { if (!open) { setVerification(null); setRejectReason(""); } }} title="Tolak Pembayaran" showHeader={false}>
+        <form className="bg-card" onSubmit={(event) => {
+          event.preventDefault();
+          if (!verification || verification.action !== "reject") return;
+          if (!rejectReason.trim()) { toast.error("Alasan penolakan wajib diisi"); return; }
+          rejectPayment.mutate({ paymentId: verification.id, reason: rejectReason.trim() });
+        }}>
+          <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+            <span className="grid size-10 place-items-center rounded-lg bg-destructive/10 text-destructive"><ReceiptText className="size-5" /></span>
+            <div><h2 className="font-display text-lg">Tolak Pembayaran</h2><p className="text-sm text-muted-foreground">Pembayaran tidak akan mengurangi sisa tagihan.</p></div>
+          </div>
+          <div className="p-5">
+            <label className="grid gap-1.5 text-sm"><span className="text-xs font-medium text-muted-foreground">Alasan penolakan</span><textarea className="min-h-24 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring/30" value={rejectReason} onChange={(event) => setRejectReason(event.target.value)} placeholder="Contoh: bukti transfer tidak valid" /></label>
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-5 py-4"><button type="button" className="rounded-md border border-border px-4 py-2.5 text-sm font-medium" onClick={() => { setVerification(null); setRejectReason(""); }}>Batal</button><button className="rounded-md bg-destructive px-4 py-2.5 text-sm font-semibold text-destructive-foreground disabled:opacity-60" disabled={rejectPayment.isPending}>{rejectPayment.isPending ? "Memproses..." : "Tolak Pembayaran"}</button></div>
+        </form>
+      </ModalForm>}
     </AppShell>
   );
 }
@@ -437,21 +460,24 @@ function todayDate() {
 function PurchasePackageForm({
   children,
   packages,
+  methods,
   isSaving,
   onSubmit,
   onCancel,
 }: {
   children: Child[];
   packages: MasterPackage[];
+  methods: string[];
   isSaving: boolean;
-  onSubmit: (payload: { childId: string; packageName: string; startDate: string; paymentStatus: "Belum Dibayar" | "Lunas" }) => void;
+  onSubmit: (payload: { childId: string; packageName: string; startDate: string; payNow: boolean; paymentMethod?: string }) => void;
   onCancel: () => void;
 }) {
   const [form, setForm] = useState({
     childId: children[0]?.id ?? "",
     packageName: packages[0]?.name ?? "",
     startDate: todayDate(),
-    paymentStatus: "Belum Dibayar" as "Belum Dibayar" | "Lunas",
+    payNow: false,
+    paymentMethod: methods[0] ?? "",
   });
   const selectedPackage = packages.find((item) => item.name === form.packageName);
 
@@ -460,8 +486,9 @@ function PurchasePackageForm({
       ...current,
       childId: current.childId || children[0]?.id || "",
       packageName: current.packageName || packages[0]?.name || "",
+      paymentMethod: current.paymentMethod || methods[0] || "",
     }));
-  }, [children, packages]);
+  }, [children, methods, packages]);
 
   return (
     <form
@@ -469,7 +496,8 @@ function PurchasePackageForm({
       onSubmit={(event) => {
         event.preventDefault();
         if (!form.childId || !form.packageName) { toast.error("Anak dan paket wajib dipilih"); return; }
-        onSubmit(form);
+        if (form.payNow && !form.paymentMethod) { toast.error("Metode pembayaran wajib dipilih untuk bayar langsung"); return; }
+        onSubmit({ childId: form.childId, packageName: form.packageName, startDate: form.startDate, payNow: form.payNow, paymentMethod: form.payNow ? form.paymentMethod : undefined });
       }}
     >
       <div className="flex items-center gap-3 border-b border-border px-5 py-4">
@@ -520,16 +548,22 @@ function PurchasePackageForm({
           />
         </label>
         <label className="grid gap-1.5 text-sm">
-          <span className="text-xs font-medium text-muted-foreground">Status pembayaran</span>
+          <span className="text-xs font-medium text-muted-foreground">Pembayaran</span>
           <select
             className="min-h-10 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring/30"
-            value={form.paymentStatus}
-            onChange={(event) => setForm({ ...form, paymentStatus: event.target.value as "Belum Dibayar" | "Lunas" })}
+            value={form.payNow ? "direct" : "later"}
+            onChange={(event) => setForm({ ...form, payNow: event.target.value === "direct" })}
           >
-            <option value="Belum Dibayar">Belum Dibayar</option>
-            <option value="Lunas">Lunas</option>
+            <option value="later">Bayar nanti</option>
+            <option value="direct" disabled={!methods.length}>Bayar langsung</option>
           </select>
         </label>
+        {form.payNow && <label className="grid gap-1.5 text-sm sm:col-span-2">
+          <span className="text-xs font-medium text-muted-foreground">Metode pembayaran</span>
+          <select className="min-h-10 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring/30" value={form.paymentMethod} onChange={(event) => setForm({ ...form, paymentMethod: event.target.value })}>
+            {methods.map((method) => <option key={method} value={method}>{method}</option>)}
+          </select>
+        </label>}
       </div>
       <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-4">
         <div className="text-sm text-muted-foreground">

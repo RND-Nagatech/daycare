@@ -11,10 +11,12 @@ export type Child = {
   package: string;
   status: "Di Daycare" | "Sudah Pulang" | "Belum Datang";
   checkInTime?: string;
+  checkInAt?: Date;
   droppedOffBy?: string;
   caregiver?: string;
   checkInNotes?: string;
   checkOutTime?: string;
+  checkOutAt?: Date;
   pickedUpBy?: string;
   checkOutCaregiver?: string;
   checkOutNotes?: string;
@@ -97,7 +99,16 @@ export type Invoice = {
   overtimeHours: number;
   overtimeRate: number;
   extras: number;
-  status: "Lunas" | "Belum Dibayar" | "Partial" | "Overdue";
+  purchaseId?: string;
+  items?: Array<{
+    type: "paket" | "biaya_tambahan" | "keterlambatan" | "lainnya";
+    referenceId?: string;
+    description: string;
+    quantity: number;
+    unitPrice: number;
+    total: number;
+  }>;
+  status: "open" | "partial" | "paid" | "cancel" | "Lunas" | "Belum Dibayar" | "Partial" | "Overdue";
   createdAt: Date;
   updatedAt: Date;
 };
@@ -113,7 +124,10 @@ export type Payment = {
   notes?: string;
   statusVerification?: "pending" | "verified" | "rejected";
   verifiedAt?: Date;
+  verifiedBy?: string;
   rejectedAt?: Date;
+  rejectedBy?: string;
+  rejectReason?: string;
   verificationNotes?: string;
   paidAt: Date;
   createdAt: Date;
@@ -132,7 +146,7 @@ export type PackagePurchase = {
   visitQuota?: number;
   visitsUsed: number;
   status: "Aktif" | "Selesai" | "Dibatalkan";
-  paymentStatus: "Belum Dibayar" | "Lunas";
+  paymentStatus: "unpaid" | "partial" | "paid" | "Belum Dibayar" | "Lunas";
   invoiceId?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -156,6 +170,8 @@ export type MasterCaregiver = {
   name: string;
   role: string;
   shift: string;
+  shiftCode?: string;
+  shiftName?: string;
   status: MasterStatus;
   createdAt: Date;
   updatedAt: Date;

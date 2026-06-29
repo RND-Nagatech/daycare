@@ -47,6 +47,10 @@ export function MasterResourceView({ resource }: { resource: string }) {
     queryFn: () => daycareApi.masterResource(resource as MasterResourceKey),
     enabled: Boolean(config),
   });
+  const { data: masterData } = useQuery({ queryKey: masterDataQueryKey, queryFn: daycareApi.masterData });
+  const shiftOptions = (masterData?.shifts ?? [])
+    .filter((shift) => shift.status === "Aktif")
+    .map((shift) => ({ value: shift.code, label: `${shift.name} (${shift.startTime}-${shift.endTime})`, name: shift.name }));
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey });
@@ -126,6 +130,7 @@ export function MasterResourceView({ resource }: { resource: string }) {
           initialValue={editing}
           isSaving={isSaving}
           error={createMutation.error?.message ?? updateMutation.error?.message}
+          shiftOptions={shiftOptions}
           onCancel={() => {
             setFormOpen(false);
             setEditing(null);
@@ -204,6 +209,7 @@ function MasterForm({
   error,
   onSubmit,
   onCancel,
+  shiftOptions,
 }: {
   config: MasterResourceConfig;
   initialValue: MasterRecord | null;
@@ -211,8 +217,16 @@ function MasterForm({
   error?: string;
   onSubmit: (payload: MasterRecord) => void;
   onCancel: () => void;
+  shiftOptions: Array<{ value: string; label: string; name: string }>;
 }) {
-  const initialForm = useMemo(() => ({ ...emptyForm(config), ...(initialValue ?? {}) }), [config, initialValue]);
+  const initialForm = useMemo(() => {
+    const initial = { ...emptyForm(config), ...(initialValue ?? {}) };
+    if (config.key === "pengasuh" && !initial.shiftCode) {
+      const matched = shiftOptions.find((shift) => shift.name === initial.shiftName || shift.name === initial.shift);
+      if (matched) initial.shiftCode = matched.value;
+    }
+    return initial;
+  }, [config, initialValue, shiftOptions]);
   const [form, setForm] = useState<MasterRecord>(initialForm);
 
   function submit(event: FormEvent) {
@@ -224,12 +238,16 @@ function MasterForm({
         return [field.key, value];
       }),
     ) as MasterRecord;
+    if (config.key === "pengasuh") {
+      payload.shiftName = shiftOptions.find((item) => item.value === payload.shiftCode)?.name;
+    }
     onSubmit(payload);
   }
 
   return (
     <form onSubmit={submit}>
       <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3">
+        {config.key === "pengasuh" && shiftOptions.length === 0 && <div className="rounded-lg border border-warning/40 bg-warning/15 px-4 py-3 text-sm text-warning-foreground md:col-span-2 xl:col-span-3">Data Shift belum tersedia. Tambahkan dan aktifkan data pada Master Shift terlebih dahulu.</div>}
         {config.fields.map((field) => (
           <MasterInput
             key={field.key}
@@ -237,7 +255,14 @@ function MasterForm({
             value={form[field.key]}
             disabled={Boolean(initialValue && field.key === config.idField)}
             required={field.key === config.idField || field.key === "name" || field.key === "title"}
-            onChange={(value) => setForm((current) => ({ ...current, [field.key]: value }))}
+            options={field.optionsSource === "shifts" ? shiftOptions : undefined}
+            onChange={(value) => setForm((current) => {
+              if (field.key === "shiftCode") {
+                const shift = shiftOptions.find((item) => item.value === value);
+                return { ...current, shiftCode: value, shiftName: shift?.name };
+              }
+              return { ...current, [field.key]: value };
+            })}
           />
         ))}
       </div>
@@ -246,7 +271,7 @@ function MasterForm({
         <button type="button" className="rounded-xl border border-border bg-card px-4 py-2.5 text-sm font-semibold text-muted-foreground hover:text-foreground" onClick={onCancel}>
           Batal
         </button>
-        <button className="rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60" disabled={isSaving}>
+        <button className="rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60" disabled={isSaving || (config.key === "pengasuh" && shiftOptions.length === 0)}>
           {isSaving ? "Menyimpan..." : "Simpan"}
         </button>
       </div>
@@ -259,12 +284,14 @@ function MasterInput({
   value,
   disabled,
   required,
+  options,
   onChange,
 }: {
   field: MasterField;
   value: MasterRecord[string];
   disabled?: boolean;
   required?: boolean;
+  options?: Array<{ value: string; label: string }>;
   onChange: (value: MasterRecord[string]) => void;
 }) {
   if (field.type === "checkbox") {
@@ -296,13 +323,14 @@ function MasterInput({
         <span className="text-xs font-medium text-muted-foreground">{field.label}{required ? " *" : ""}</span>
         <select
           className="min-h-10 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring/30"
-          value={String(value ?? field.options?.[0] ?? "")}
+          value={String(value ?? options?.[0]?.value ?? field.options?.[0] ?? "")}
           onChange={(event) => onChange(event.target.value)}
           required={required}
         >
-          {(field.options ?? []).map((option) => (
-            <option key={option} value={option}>
-              {option}
+          {options && <option value="">Pilih {field.label}</option>}
+          {(options ?? (field.options ?? []).map((option) => ({ value: option, label: option }))).map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
             </option>
           ))}
         </select>

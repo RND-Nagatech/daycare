@@ -155,20 +155,22 @@ v1Get("/auth/me", (req) => Promise.resolve(publicUser(req.res?.locals.user)));
 v1Get("/daycare", () => daycareService.snapshot());
 v1Get("/master-data", () => daycareService.masterData());
 v1Get("/master/:resource", (req) => daycareService.listMasterResource(routeParam(req.params.resource)));
-v1Get("/dashboard/admin", () => daycareService.snapshot());
+v1Get("/dashboard/admin", () => daycareService.dashboardAdmin());
+v1Get("/users", () => daycareService.listUsers());
 
 v1Post("/master/:resource", (req) => daycareService.createMasterResource(routeParam(req.params.resource), req.body));
 v1Post("/anak", (req) => daycareService.createChild(req.body));
 v1Post("/registrasi-anak", (req) => daycareService.createChild(req.body));
-v1Post("/pembelian-paket", (req) => daycareService.purchasePackage(req.body));
+v1Post("/pembelian-paket", (req) => daycareService.purchasePackage(req.body, req.res?.locals.user.id));
 v1Post("/booking", (req) => daycareService.createBooking(req.body));
 v1Post("/checkin", (req) => daycareService.checkIn(req.body.childId, req.body));
 v1Post("/aktivitas-harian", (req) => daycareService.createActivity(req.body));
 v1Post("/catatan-kesehatan", (req) => daycareService.createHealthNote(req.body));
 v1Post("/insiden", (req) => daycareService.createIncident(req.body));
 v1Post("/pembayaran", (req) => daycareService.createPayment(req.body));
-v1Post("/pembayaran/:paymentId/verify", (req) => daycareService.verifyPayment(routeParam(req.params.paymentId), req.body));
-v1Post("/pembayaran/:paymentId/reject", (req) => daycareService.rejectPayment(routeParam(req.params.paymentId), req.body));
+v1Post("/pembayaran/:paymentId/verify", (req) => daycareService.verifyPayment(routeParam(req.params.paymentId), req.body, req.res?.locals.user.id));
+v1Post("/pembayaran/:paymentId/reject", (req) => daycareService.rejectPayment(routeParam(req.params.paymentId), req.body, req.res?.locals.user.id));
+v1Post("/users", (req) => daycareService.createUser(req.body));
 
 v1Patch("/anak/:childId/check-in", (req) => daycareService.checkIn(routeParam(req.params.childId), req.body));
 v1Patch("/anak/:childId/check-out", (req) => daycareService.checkOut(routeParam(req.params.childId), req.body));
@@ -177,9 +179,11 @@ v1Post("/tagihan/recalculate", () => daycareService.recalculateInvoices());
 v1Put("/master/:resource/:id", (req) =>
   daycareService.updateMasterResource(routeParam(req.params.resource), routeParam(req.params.id), req.body),
 );
+v1Put("/users/:id", (req) => daycareService.updateUser(routeParam(req.params.id), req.body));
 v1Delete("/master/:resource/:id", (req) =>
   daycareService.deleteMasterResource(routeParam(req.params.resource), routeParam(req.params.id)),
 );
+v1Delete("/users/:id", (req) => daycareService.deleteUser(routeParam(req.params.id)));
 
 app.get("/api/daycare", async (_req, res, next) => {
   try {
@@ -207,7 +211,7 @@ app.post("/api/daycare/children", async (req, res, next) => {
 
 app.post("/api/daycare/package-purchases", async (req, res, next) => {
   try {
-    res.status(201).json(await daycareService.purchasePackage(req.body));
+    res.status(201).json(await daycareService.purchasePackage(req.body, res.locals.user?.id));
   } catch (error) {
     next(error);
   }

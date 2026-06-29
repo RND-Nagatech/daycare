@@ -35,11 +35,11 @@ export type MasterActivity = {
 };
 
 export type MasterDataSnapshot = {
-  caregivers: Array<{ code: string; name: string; role: string; shift: string; status: MasterStatus }>;
+  caregivers: Array<{ code: string; name: string; role: string; shift: string; shiftCode?: string; shiftName?: string; status: MasterStatus }>;
   packages: MasterPackage[];
   activityTypes: MasterActivity[];
   ageGroups: Array<{ code: string; name: string; minAgeMonths: number; maxAgeMonths: number; capacity: number; status: MasterStatus }>;
-  rooms: Array<{ code: string; name: string; capacity: number; location?: string; description?: string; status: MasterStatus }>;
+  rooms: Array<{ code: string; name: string; capacity: number; location?: string; description?: string; status: MasterStatus; createdAt?: string; updatedAt?: string }>;
   shifts: Array<{ code: string; name: string; startTime: string; endTime: string; description?: string; status: MasterStatus }>;
   additionalFees: Array<{
     code: string;
@@ -108,8 +108,9 @@ export type PackagePurchase = {
   visitQuota?: number;
   visitsUsed: number;
   status: "Aktif" | "Selesai" | "Dibatalkan";
-  paymentStatus: "Belum Dibayar" | "Lunas";
+  paymentStatus: "unpaid" | "partial" | "paid" | "Belum Dibayar" | "Lunas";
   invoiceId?: string;
+  createdAt?: string;
 };
 
 export type Booking = {
@@ -130,7 +131,10 @@ export type Payment = {
   notes?: string;
   statusVerification?: "pending" | "verified" | "rejected";
   verifiedAt?: string;
+  verifiedBy?: string;
   rejectedAt?: string;
+  rejectedBy?: string;
+  rejectReason?: string;
   verificationNotes?: string;
   paidAt: string;
 };
@@ -210,7 +214,26 @@ export type PurchasePackageInput = {
   packageName: string;
   startDate?: string;
   paymentStatus?: PackagePurchase["paymentStatus"];
+  payNow?: boolean;
+  paymentMethod?: string;
 };
+
+export type AdminDashboard = {
+  operational: { totalChildren: number; totalCaregivers: number; totalPackages: number; bookingsToday: number; checkInsToday: number; childrenInCare: number; checkOutsToday: number };
+  finance: { openInvoices: number; partialInvoices: number; pendingPayments: number; revenueToday: number; revenueMonth: number };
+};
+
+export type ManagedUser = {
+  id: string;
+  name: string;
+  email: string;
+  role: "super_admin" | "admin" | "staff" | "parent";
+  status: "Aktif" | "Nonaktif";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SaveUserInput = { name: string; email: string; password?: string; role: ManagedUser["role"]; status: ManagedUser["status"] };
 
 export type CreateBookingInput = {
   childId: string;
@@ -304,6 +327,26 @@ export const daycareApi = {
 
   me() {
     return requestJson<AuthUser>("/api/v1/auth/me");
+  },
+
+  dashboard() {
+    return requestJson<AdminDashboard>("/api/v1/dashboard/admin");
+  },
+
+  users() {
+    return requestJson<ManagedUser[]>("/api/v1/users");
+  },
+
+  createUser(input: SaveUserInput) {
+    return requestJson<ManagedUser>("/api/v1/users", { method: "POST", body: JSON.stringify(input) });
+  },
+
+  updateUser(id: string, input: SaveUserInput) {
+    return requestJson<ManagedUser>(`/api/v1/users/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(input) });
+  },
+
+  deleteUser(id: string) {
+    return requestJson<ManagedUser>(`/api/v1/users/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
   snapshot() {
     return requestJson<DaycareSnapshot>("/api/v1/daycare");
@@ -419,7 +462,7 @@ export const daycareApi = {
     );
   },
 
-  rejectPayment(paymentId: string, input: { notes?: string } = {}) {
+  rejectPayment(paymentId: string, input: { reason: string }) {
     return requestJson<{ payment: Payment; invoice: InvoiceWithTotal; paidTotal: number; remaining: number }>(
       `/api/v1/pembayaran/${encodeURIComponent(paymentId)}/reject`,
       {

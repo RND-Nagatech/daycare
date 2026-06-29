@@ -7,7 +7,6 @@ import {
   Baby,
   Banknote,
   Bell,
-  BellRing,
   CalendarCheck,
   ChevronDown,
   ClipboardList,
@@ -17,7 +16,6 @@ import {
   Database,
   DoorOpen,
   FileBarChart,
-  Hash,
   HeartPulse,
   LayoutDashboard,
   LogIn,
@@ -122,8 +120,6 @@ const menuGroups: Array<{ key: string; label: string; icon: LucideIcon; children
     children: [
       { label: "Profil Daycare", to: "/pengaturan/profil", icon: Settings },
       { label: "Hari Libur", to: "/pengaturan/hari-libur", icon: CalendarCheck },
-      { label: "Penomoran", to: "/pengaturan/penomoran", icon: Hash },
-      { label: "Notifikasi", to: "/pengaturan/notifikasi", icon: BellRing },
     ],
   },
 ];
